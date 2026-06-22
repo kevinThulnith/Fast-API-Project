@@ -21,3 +21,6 @@ dependencies = [
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[pytest]
+python_files = "test_*.py, *_test.py, generated_tests.py"

@@ -38,6 +38,7 @@ def get_git_diff(commit: str = "HEAD") -> str:
             ["git", "diff", commit],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=True,
         )
         return result.stdout
@@ -85,25 +86,29 @@ def parse_diff(diff_text: str) -> Dict[str, List[int]]:
 # Step 2 – Collect existing tests
 # ---------------------------------------------------------------------------
 def collect_tests() -> List[str]:
-    """
-    Use pytest --collect-only to get a list of test function names.
-    Returns a list of test IDs (e.g., 'tests/test.py::test_get_users').
-    """
     try:
-        # 🟢 FIX: Explicitly target tests/test.py here so pytest discovers your file
+        # 1. Explicitly point to the specific directories/files
+        # 2. Add the encoding="utf-8" argument to haPndle non-ASCII characters
         result = subprocess.run(
-            ["pytest", "tests/test.py", "--collect-only", "-q", "--no-header"],
+            [
+                "pytest",
+                "tests/test.py",
+                "tests_generated/generated_tests.py",
+                "--collect-only",
+                "-q",
+                "--no-header",
+            ],
             capture_output=True,
             text=True,
+            encoding="utf-8",  # 👈 Prevents the UnicodeDecodeError
         )
-        # Parse lines like: "tests/test.py::test_get_users"
         tests = []
         for line in result.stdout.splitlines():
-            if "::" in line and "[" not in line:  # skip parametrized for simplicity
+            if "::" in line and "[" not in line:
                 tests.append(line.strip())
         return tests
     except Exception as e:
-        print(f"⚠️  Failed to collect tests: {e}")
+        print(f"Failed to collect tests: {e}")
         return []
 
 
@@ -331,9 +336,7 @@ async def main():
                 if fixed:
                     print("   💡 Suggested fix (review and apply):")
                     print("   " + "\n   ".join(fixed.splitlines()))
-                    print(
-                        f"   ℹ️  Replace the old function in {test_id.split('::')[0]}"
-                    )
+                    print(f"   ℹ️  Replace the old function in {test_id.split('::')[0]}")
                 else:
                     print("   ⚠️  Could not auto-heal. Please fix manually.")
             else:
