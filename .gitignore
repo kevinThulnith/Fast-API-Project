@@ -12,3 +12,4 @@ github
 *.pub
 
 .pytest_cache/
+*.env
