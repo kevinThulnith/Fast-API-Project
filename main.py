@@ -198,7 +198,7 @@ async def observability_middleware(request: Request, call_next):
 @app.get(
     "/api/health",
     tags=["observability"],
-    summary="Health check with uptime and DB size",
+    summary="Health check with uptime and DB size in milliseconds",
 )
 async def health():
     """

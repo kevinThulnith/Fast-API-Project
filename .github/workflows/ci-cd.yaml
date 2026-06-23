@@ -68,6 +68,34 @@ jobs:
           path: test-results.csv
           retention-days: 7
 
+      - name: Run test selector with self-healing (predictive test selection)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL || 'google/gemini-2.5-flash' }}
+        run: |
+          # Get diff from the last commit (or against origin/main for PRs)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # For PRs, diff against the base branch
+            git fetch origin ${{ github.base_ref }}
+            DIFF=$(git diff origin/${{ github.base_ref }}...HEAD)
+          else
+            # For push, diff against the previous commit
+            DIFF=$(git diff HEAD~1)
+          fi
+          # Write diff to a temporary file
+          echo "$DIFF" > /tmp/diff.txt
+          mkdir -p reports
+          # Run selector with the diff, enabling self-healing and running medium-priority tests
+          uv run python tests_selecter/selecter.py --diff /tmp/diff.txt --run-medium --no-heal --csv-out reports/test_results.csv
+
+      - name: Upload Test Selector Results Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selector-test-results
+          path: reports/test_results.csv
+          retention-days: 7
+
       - name: Upload server log (for debugging)
         uses: actions/upload-artifact@v4
         if: always()

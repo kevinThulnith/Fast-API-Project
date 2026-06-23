@@ -1,10 +1,12 @@
 import argparse
 import asyncio
+import csv
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -250,6 +252,33 @@ Return only the corrected function code (the whole function), no markdown fences
 
 
 # ---------------------------------------------------------------------------
+# CSV reporting helper
+# ---------------------------------------------------------------------------
+def _write_csv(path: Optional[str], rows: List[Dict[str, str]]) -> None:
+    """Write the selected/executed tests to a CSV with columns:
+    id,status,duration,message
+
+    Writes a header-only CSV when there are no rows, so downstream steps
+    (e.g. actions/upload-artifact) always have a file to pick up, and so the
+    artifact is consistent in shape with the main pytest --csv report.
+    """
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f, fieldnames=["id", "status", "duration", "message"]
+            )
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+        print(f"📄 Wrote CSV report to {path} ({len(rows)} row(s))")
+    except Exception as e:
+        print(f"⚠️  Could not write CSV report to {path}: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Step 5 – Main driver
 # ---------------------------------------------------------------------------
 async def main():
@@ -262,6 +291,12 @@ async def main():
     parser.add_argument(
         "--no-heal", action="store_true", help="Skip self-healing attempts"
     )
+    parser.add_argument(
+        "--csv-out",
+        default=None,
+        help="Path to write a CSV report (columns: id,status,duration,message) "
+        "for the tests that were actually selected and run",
+    )
     args = parser.parse_args()
 
     # Obtain diff
@@ -272,6 +307,7 @@ async def main():
 
     if not diff_text:
         print("❌ No changes detected. Exiting.")
+        _write_csv(args.csv_out, [])
         return
 
     print("📝 Analysing code changes…")
@@ -289,6 +325,7 @@ async def main():
     tests = collect_tests()
     if not tests:
         print("❌ No tests found. Are you in the correct directory?")
+        _write_csv(args.csv_out, [])
         return
     print(f"📋 Found {len(tests)} tests.")
 
@@ -316,32 +353,61 @@ async def main():
         to_run.extend(medium)
     if not to_run:
         print("✅ No tests selected for execution. Exiting.")
+        _write_csv(args.csv_out, [])
         return
 
     print(f"\n🧪 Running {len(to_run)} tests…")
+    csv_rows: List[Dict[str, str]] = []
     for test_id in to_run:
         print(f"\n▶️  {test_id}")
+        start = time.monotonic()
         result = subprocess.run(
             ["pytest", test_id, "-v", "--tb=short", "--no-header"],
             capture_output=True,
             text=True,
         )
+        duration = round(time.monotonic() - start, 3)
+
         if result.returncode == 0:
             print("   ✅ PASSED")
+            csv_rows.append(
+                {
+                    "id": test_id,
+                    "status": "passed",
+                    "duration": duration,
+                    "message": "",
+                }
+            )
         else:
             print("   ❌ FAILED")
+            failure_message = (result.stdout + "\n" + result.stderr).strip()
             if not args.no_heal:
                 print("   🔧 Attempting self-heal…")
-                fixed = await suggest_fix(test_id, result.stdout + "\n" + result.stderr)
+                fixed = await suggest_fix(test_id, failure_message)
                 if fixed:
                     print("   💡 Suggested fix (review and apply):")
                     print("   " + "\n   ".join(fixed.splitlines()))
                     print(f"   ℹ️  Replace the old function in {test_id.split('::')[0]}")
+                    failure_message = (
+                        f"{failure_message[:500]} | self-heal suggestion generated"
+                    )
                 else:
                     print("   ⚠️  Could not auto-heal. Please fix manually.")
             else:
                 print("   ℹ️  Self-heal disabled by --no-heal.")
 
+            # Keep the CSV message field short and single-line for readability.
+            short_message = " ".join(failure_message.split())[:300]
+            csv_rows.append(
+                {
+                    "id": test_id,
+                    "status": "failed",
+                    "duration": duration,
+                    "message": short_message,
+                }
+            )
+
+    _write_csv(args.csv_out, csv_rows)
     print("\n✅ Test selection and execution complete.")
 
 
