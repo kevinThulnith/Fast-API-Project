@@ -93,7 +93,7 @@ def collect_tests() -> List[str]:
             [
                 "pytest",
                 "tests/test.py",
-                "tests_generated/generated_tests.py",
+                "tests_generated/generated_test.py",
                 "--collect-only",
                 "-q",
                 "--no-header",

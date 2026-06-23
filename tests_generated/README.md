@@ -11,3 +11,8 @@ run genarated tests.
 ```sh
 uv run pytest .\tests_generated\generated_tests.py -v
 ```
+run genarated tests sample.
+
+```sh
+uv run pytest .\tests_generated\generated_test.py -v
+```

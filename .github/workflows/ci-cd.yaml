@@ -1,97 +1,33 @@
-name: CI/CD Pipeline for LLM-CTF Framework
+name: CI/CD Pipeline
 
 on:
-  push:
-    branches: ["main", "master"]
   pull_request:
-    branches: ["main", "master"]
-  workflow_dispatch: # Allow manual trigger
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
-  test-and-generate:
+  API-CI:
+    name: API CI
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout code changes
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Get full history for diffs
+          fetch-depth: 0
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
-      - name: Install uv (fast Python package installer)
-        run: |
-          pip install uv
-
-      - name: Install dependencies with uv
-        run: |
-          uv sync --frozen
-
-      - name: Start FastAPI server (target API)
-        run: |
-          # Run the API in the background; it will seed the DB on startup
-          uv run uvicorn main:app --host 0.0.0.0 --port 8000 &
-          # Wait for the server to become ready
-          for i in {1..30}; do
-            if curl -s -f http://localhost:8000/api/health > /dev/null; then
-              echo "Server is up!"
-              break
-            fi
-            echo "Waiting for server..."
-            sleep 2
-          done
-
-      - name: Run test generator (LLM-driven test creation)
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL || 'google/gemini-2.5-flash' }}
-        run: |
-          # The generator fetches OpenAPI spec, calls LLM, writes tests, and runs pytest with coverage
-          uv run python tests_generated/generator.py
-
-      - name: Run test selector with self-healing (predictive test selection)
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL || 'google/gemini-2.5-flash' }}
-        run: |
-          # Get diff from the last commit (or against origin/main for PRs)
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # For PRs, diff against the base branch
-            git fetch origin ${{ github.base_ref }}
-            DIFF=$(git diff origin/${{ github.base_ref }}...HEAD)
-          else
-            # For push, diff against the previous commit
-            DIFF=$(git diff HEAD~1)
-          fi
-          # Write diff to a temporary file
-          echo "$DIFF" > /tmp/diff.txt
-          mkdir -p reports
-          # Run selector with the diff, enabling self-healing and running medium-priority tests
-          uv run python tests_selecter/selecter.py --diff /tmp/diff.txt --run-medium --no-heal --csv-out reports/test_results.csv
-
-      - name: Archive generated tests and reports
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
         with:
-          name: llm-ctf-artifacts
-          path: |
-            reports/test_results.csv
-            .coverage
-            coverage.xml
-            htmlcov/
-            reports/
-            test_results.xml
-            *.log
-          retention-days: 7
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
-      - name: (Optional) Run comparison evaluation
-        if: false # Currently not implemented; enable when ready
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: |
-          # Placeholder for future comparison script
-          # uv run python scripts/compare_methods.py --source main.py --runs 1
-          echo "Comparison script not implemented yet."
+      - name: Install dependencies
+        run: uv sync --frozen
