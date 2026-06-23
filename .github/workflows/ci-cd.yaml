@@ -31,10 +31,37 @@ jobs:
           python-version: "3.14"
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
         run: uv sync --frozen
+
+      - name: Start API server
+        run: |
+          uv run uvicorn main:app --host 0.0.0.0 --port 8000 &
+          for i in {1..30}; do
+            if curl -s -f http://localhost:8000/api/health > /dev/null; then
+              echo "Server is up!"
+              break
+            fi
+            echo "Waiting for server..."
+            sleep 2
+          done
+
+      - name: first test
+        run: uv run pytest .\tests\test.py -v --csv=test-results.csv --csv-columns=id,status,duration,message
+
+      - name: second test
+        if: always()
+        run: uv run pytest .\tests_generated\generated_test.py -v --csv=test-results.csv --csv-columns=id,status,duration,message
+
+      - name: Upload Test Results Artifact
+        uses: actions/upload-artifact@v4
+        if: always() # Crucial: Guarantees the CSV uploads even if tests in either step fail
+        with:
+          name: api-test-results
+          path: test-results.csv
+          retention-days: 7
