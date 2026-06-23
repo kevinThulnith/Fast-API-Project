@@ -18,7 +18,6 @@ jobs:
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
-
     steps:
       - name: Checkout code changes
         uses: actions/checkout@v4
@@ -41,7 +40,14 @@ jobs:
 
       - name: Start API server
         run: |
-          uv run uvicorn main:app --host 0.0.0.0 --port 8000 &
+          # Make sure the venv exists and is synced before we background anything.
+          uv run python -c "print('venv ready')"
+
+          # Run uvicorn directly from the venv (NOT via `uv run`) so there is no
+          # long-lived `uv` parent process holding a lock on the uv cache.
+          nohup .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 > server.log 2>&1 &
+          echo $! > server.pid
+
           for i in {1..30}; do
             if curl -s -f http://localhost:8000/api/health > /dev/null; then
               echo "Server is up!"
@@ -62,6 +68,25 @@ jobs:
           path: test-results.csv
           retention-days: 7
 
+      - name: Upload server log (for debugging)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: api-server-log
+          path: server.log
+          retention-days: 7
+
       - name: Stop API server
         if: always()
-        run: kill $(cat server.pid) || true
+        run: |
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" 2>/dev/null || true
+            sleep 1
+          fi
+          # Belt-and-suspenders: catch anything matching by name too.
+          pkill -9 -f "uvicorn main:app" 2>/dev/null || true
+          sleep 1
+
+      - name: Debug - check for lingering uv/uvicorn processes
+        if: always()
+        run: ps aux | grep -E "uv|uvicorn" | grep -v grep || echo "none found"
