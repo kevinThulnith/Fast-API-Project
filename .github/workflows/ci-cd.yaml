@@ -68,8 +68,9 @@ jobs:
           fi
           # Write diff to a temporary file
           echo "$DIFF" > /tmp/diff.txt
+          mkdir -p reports
           # Run selector with the diff, enabling self-healing and running medium-priority tests
-          uv run python tests_selecter/selecter.py --diff /tmp/diff.txt --run-medium --no-heal
+          uv run python tests_selecter/selecter.py --diff /tmp/diff.txt --run-medium --no-heal --csv-out reports/test_results.csv
 
       - name: Archive generated tests and reports
         if: always()
@@ -77,7 +78,7 @@ jobs:
         with:
           name: llm-ctf-artifacts
           path: |
-            tests_generated/generated_tests.py
+            reports/test_results.csv
             .coverage
             coverage.xml
             htmlcov/
