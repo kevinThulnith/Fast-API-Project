@@ -51,16 +51,13 @@ jobs:
             sleep 2
           done
 
-      - name: first test
-        run: uv run pytest tests/test.py -v --csv=test-results.csv --csv-columns=id,status,duration,message
-
-      - name: second test
-        if: always()
-        run: uv run pytest tests_generated/generated_test.py -v --csv=test-results.csv --csv-columns=id,status,duration,message
+      - name: Run all tests
+        run: |
+          uv run pytest tests/test.py tests_generated/generated_tests.py -v --csv=test-results.csv --csv-columns=id,status,duration,message
 
       - name: Upload Test Results Artifact
         uses: actions/upload-artifact@v4
-        if: always() # Crucial: Guarantees the CSV uploads even if tests in either step fail
+        if: always()
         with:
           name: api-test-results
           path: test-results.csv
