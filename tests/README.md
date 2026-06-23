@@ -2,6 +2,6 @@
 
 to run this
 
-```sh
+```pwsh
 uv run pytest .\tests\test.py -v
 ```
