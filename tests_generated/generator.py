@@ -1,6 +1,8 @@
+import ast
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -32,6 +34,12 @@ client = OpenAI(
 )
 
 SERVER_URL = "http://localhost:8000"
+
+# Max tokens per generation request. OpenRouter free/low-credit accounts cap
+# total tokens-affordable-per-request (your account is currently capped
+# around ~1100). Keep this comfortably under that ceiling — override via
+# the MAX_TOKENS env var once you add credits and want richer test bodies.
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1000"))
 
 
 # ---------------------------------------------------------------------------
@@ -72,13 +80,14 @@ Expected Responses:
 {json.dumps(responses, indent=2)}
 
 Write a **single** pytest-asyncio test function that:
-- Uses the `client` fixture (httpx.AsyncClient).
-- Covers the happy path and the main error cases (404, 422 validation errors).
-- For GET: test a valid ID and an invalid/non‑existent ID.
-- For POST: test valid creation, invalid payload (blank/too long), and user not found (if applicable).
-- For PUT: test update, 404, validation errors.
-- For DELETE: test deletion, then 404 on second attempt.
+- Takes `client` as its only parameter — this is an async httpx.AsyncClient fixture provided by the project's conftest.py. Do not define or import it yourself.
+- Covers the happy path and the main error cases (404, 422 validation errors) ONLY if they are actually applicable to this specific endpoint based on the spec above. Skip inapplicable cases silently — do not write comments explaining why a case doesn't apply.
+- For GET: test a valid ID and an invalid/non‑existent ID, if the endpoint takes an ID.
+- For POST: test valid creation, invalid payload (blank/too long), and user not found, if applicable.
+- For PUT: test update, 404, validation errors, if applicable.
+- For DELETE: test deletion, then 404 on second attempt, if applicable.
 - Asserts both status codes and response structure (check presence of keys like "id", "user", etc.).
+- Contains NO comments and NO explanatory prose — only executable code. Every line must be a statement, not a note.
 
 Name the function: `test_{method}_api_{path.replace("/", "_").strip("_")}`
 
@@ -88,38 +97,87 @@ Return **only the Python code**, no markdown fences, no extra text.
 
 
 # ---------------------------------------------------------------------------
-# Step 3 – Call OpenRouter (non‑streaming)
+# Step 3a – Extract code from a model response and validate it
 # ---------------------------------------------------------------------------
-async def generate_test(prompt):
+def _extract_code(text: str) -> str:
+    """Pull code out of a ```python ... ``` / ``` ... ``` fence if present.
+
+    Using a regex here (rather than fixed-width slicing on startswith) is
+    robust to variations like ```py, ```Python, a fence with no trailing
+    newline, or stray prose the model added despite being told not to.
+    """
+    text = text.strip()
+    match = re.search(r"```(?:python|py)?\s*\n(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    # No fences found — assume the whole response is already raw code.
+    return text
+
+
+def _is_valid_python(code: str) -> bool:
+    """Quick syntax check so we never write unparseable code to disk."""
     try:
-        # Offload the synchronous OpenAI/OpenRouter client call to an async thread pool
-        response = await asyncio.to_thread(
-            client.chat.completions.create,
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=800,
-            extra_headers={
-                "HTTP-Referer": "https://localhost:8000",  # Optional OpenRouter leaderboard tracking
-                "X-Title": "FastAPI Test Generator",
-            },
-        )
+        ast.parse(code)
+        return True
+    except SyntaxError:
+        return False
 
-        # OpenRouter extracts text structure identically to standard OpenAI completions
-        code = response.choices[0].message.content.strip()
 
-        # Remove markdown code fences if present
-        if code.startswith("```python"):
-            code = code[9:]
-        if code.startswith("```"):
-            code = code[3:]
-        if code.endswith("```"):
-            code = code[:-3]
-        return code.strip()
+# ---------------------------------------------------------------------------
+# Step 3 – Call OpenRouter (non‑streaming), with validation + one retry
+# ---------------------------------------------------------------------------
+async def generate_test(prompt, retries: int = 1):
+    last_invalid_code = None
 
-    except Exception as e:
-        print(f"⚠️  OpenRouter Gemini call failed: {e}")
-        return None
+    for attempt in range(retries + 1):
+        try:
+            # Offload the synchronous OpenAI/OpenRouter client call to an async thread pool
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model=MODEL_NAME,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                # 800 tokens is too tight for a function covering happy-path +
+                # 404 + 422 + structure assertions — truncation mid-function
+                # is the most common cause of "syntax/indentation errors".
+                # Capped via MAX_TOKENS to also respect OpenRouter credit limits.
+                max_tokens=MAX_TOKENS,
+                extra_headers={
+                    "HTTP-Referer": "https://localhost:8000",  # Optional OpenRouter leaderboard tracking
+                    "X-Title": "FastAPI Test Generator",
+                },
+            )
+
+            raw = response.choices[0].message.content.strip()
+            code = _extract_code(raw)
+
+            if _is_valid_python(code):
+                return code
+
+            last_invalid_code = code
+            remaining = retries - attempt
+            print(
+                f"   ⚠️  Attempt {attempt + 1} produced invalid Python "
+                f"(syntax error) — {'retrying' if remaining > 0 else 'giving up'}."
+            )
+
+        except Exception as e:
+            err_str = str(e)
+            if "402" in err_str or "more credits" in err_str.lower():
+                print(
+                    "❌ OpenRouter rejected the request for insufficient "
+                    "credits/budget at the current max_tokens "
+                    f"({MAX_TOKENS}). Lower MAX_TOKENS, or add credits at "
+                    "https://openrouter.ai/settings/credits."
+                )
+            else:
+                print(f"⚠️  OpenRouter Gemini call failed: {e}")
+            return None
+
+    # All retries exhausted and still invalid — skip rather than corrupt the file.
+    if last_invalid_code is not None:
+        print("   ⚠️  Skipping this test: could not get valid Python after retries.")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -151,24 +209,44 @@ async def main():
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
     OUTPUT_PATH = os.path.join(SCRIPT_DIR, "generated_tests.py")
 
+    header = (
+        "import pytest\n\n"
+        "# ---------------------------------------------------------------------------\n"
+        "# Generated tests – review before committing\n"
+        "# The `client` and `reset_db` fixtures come from the project-root\n"
+        "# conftest.py (auto-discovered by pytest) — no import needed here.\n"
+        "# ---------------------------------------------------------------------------\n\n"
+    )
+    full_file_contents = header + "\n\n".join(all_tests)
+
+    # Defense in depth: each function was validated individually, but verify
+    # the fully concatenated file too, in case of duplicate function names or
+    # other interaction effects between generations.
+    if not _is_valid_python(full_file_contents):
+        print(
+            "❌ The concatenated test file failed to parse even though each "
+            "function validated individually. Writing it anyway for "
+            "inspection, but NOT running pytest on it."
+        )
+        with open(OUTPUT_PATH, encoding="utf-8", mode="w") as f:
+            f.write(full_file_contents)
+        print(f"📄 Wrote (invalid) file to {OUTPUT_PATH} for manual review.")
+        return
+
     # Save the file using the absolute output path
     with open(OUTPUT_PATH, encoding="utf-8", mode="w") as f:
-        f.write("import pytest\nimport httpx\nfrom main import app\n\n")
-        f.write(
-            "# ---------------------------------------------------------------------------\n"
-        )
-        f.write("# Generated tests – review before committing\n")
-        f.write(
-            "# ---------------------------------------------------------------------------\n\n"
-        )
-        f.write("\n\n".join(all_tests))
+        f.write(full_file_contents)
 
     print(f"✅ Wrote {len(all_tests)} tests to {OUTPUT_PATH}")
 
     # -----------------------------------------------------------------------
-    # Step 5 – Run pytest with coverage
+    # Step 5 – Run pytest with coverage, and emit a CSV report
     # -----------------------------------------------------------------------
     print("\n🧪 Running generated tests with coverage...\n")
+    REPORTS_DIR = os.path.join(SCRIPT_DIR, "..", "reports")
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    CSV_PATH = os.path.join(REPORTS_DIR, "generated_test_results.csv")
+
     result = subprocess.run(
         [
             "pytest",
@@ -176,10 +254,13 @@ async def main():
             "--cov=main",
             "--cov-report=term-missing",
             "--tb=short",
+            f"--csv={CSV_PATH}",
+            "--csv-columns=id,status,duration,message",
         ],
         capture_output=False,
         text=True,
     )
+    print(f"📄 Wrote CSV report to {CSV_PATH}")
 
 
 # ---------------------------------------------------------------------------

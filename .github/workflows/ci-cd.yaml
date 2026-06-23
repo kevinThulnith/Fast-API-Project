@@ -1,16 +1,13 @@
 name: CI/CD Pipeline
-
 on:
   pull_request:
     branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
   packages: write
-
 jobs:
   API-CI:
     name: API CI
@@ -56,6 +53,22 @@ jobs:
             echo "Waiting for server..."
             sleep 2
           done
+
+      - name: Run test generator (LLM-driven test creation)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL || 'google/gemini-2.5-flash' }}
+        run: |
+          # The generator fetches OpenAPI spec, calls LLM, writes tests, and runs pytest with coverage
+          uv run python tests_generated/generator.py
+
+      - name: Upload Test Generator Results Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generator-test-results
+          path: reports/generated_test_results.csv
+          retention-days: 7
 
       - name: Run all tests
         run: uv run pytest tests/test.py tests_generated/generated_test.py -v --csv=test-results.csv --csv-columns=id,status,duration,message
