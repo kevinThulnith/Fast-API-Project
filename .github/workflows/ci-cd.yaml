@@ -53,7 +53,7 @@ jobs:
 
       - name: Run all tests
         run: |
-          uv run pytest tests/test.py tests_generated/generated_tests.py -v --csv=test-results.csv --csv-columns=id,status,duration,message
+          uv run pytest tests/test.py tests_generated/generated_test.py -v --csv=test-results.csv --csv-columns=id,status,duration,message
 
       - name: Upload Test Results Artifact
         uses: actions/upload-artifact@v4
