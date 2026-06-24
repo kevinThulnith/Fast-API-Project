@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -53,14 +54,129 @@ async def fetch_openapi():
 
 
 # ---------------------------------------------------------------------------
+# Step 1b – Build a plausible request body from a JSON Schema (best-effort)
+# ---------------------------------------------------------------------------
+def _resolve_schema(schema: dict, components: dict) -> dict:
+    """Resolve a single level of $ref against components.schemas."""
+    if "$ref" in schema:
+        ref_name = schema["$ref"].split("/")[-1]
+        return components.get("schemas", {}).get(ref_name, {})
+    return schema
+
+
+def _sample_value_for_property(name: str, prop: dict):
+    """Generate a small, schema-valid placeholder value for one field."""
+    p_type = prop.get("type")
+    if "minimum" in prop:
+        return prop["minimum"]
+    if p_type == "integer":
+        return 1
+    if p_type == "number":
+        return 1.0
+    if p_type == "boolean":
+        return True
+    if p_type == "array":
+        return []
+    if p_type == "string":
+        fmt = prop.get("format")
+        if fmt == "email" or "email" in name.lower():
+            return "sample@example.com"
+        min_len = prop.get("minLength", 1)
+        return ("sample text " * 3)[: max(min_len, len("sample"))] or "sample"
+    return "sample"
+
+
+def build_sample_body(operation: dict, spec: dict) -> Optional[dict]:
+    """Build a minimal valid JSON body from requestBody schema, if any."""
+    req_body = operation.get("requestBody", {})
+    if not req_body:
+        return None
+    content = req_body.get("content", {}).get("application/json", {})
+    schema = content.get("schema", {})
+    schema = _resolve_schema(schema, spec.get("components", {}))
+    properties = schema.get("properties", {})
+    if not properties:
+        return None
+    return {
+        name: _sample_value_for_property(name, prop)
+        for name, prop in properties.items()
+    }
+
+
+def build_sample_path(path: str) -> str:
+    """Replace {param} placeholders in a path with a safe sample value (1)."""
+    return re.sub(r"\{[^}]+\}", "1", path)
+
+
+# ---------------------------------------------------------------------------
+# Step 1c – Call the live server once per endpoint to get a REAL response.
+#
+# This is the fix for hallucinated response shapes: instead of asking the
+# LLM to guess field names from a possibly-empty OpenAPI response schema,
+# we show it one real, ground-truth JSON response from the running server.
+# Best-effort only — if the call fails (e.g. needs a real existing ID),
+# we fall back to "no sample available" and the LLM uses the spec alone.
+# ---------------------------------------------------------------------------
+async def fetch_sample_response(
+    http_client: httpx.AsyncClient, path: str, method: str, operation: dict, spec: dict
+) -> Optional[dict]:
+    sample_path = build_sample_path(path)
+    url = f"{SERVER_URL}{sample_path}"
+    try:
+        if method.lower() == "get":
+            resp = await http_client.get(url, timeout=5.0)
+        elif method.lower() == "delete":
+            # Never actually delete data while sampling — skip live-fetch for DELETE.
+            return None
+        elif method.lower() in ("post", "put"):
+            body = build_sample_body(operation, spec)
+            # Don't let a sampling call mutate state in ways that break later
+            # tests (e.g. don't POST /api/posts for real). Only sample safe,
+            # idempotent-ish endpoints; skip mutating writes.
+            if path.rstrip("/") in ("/api/reset", "/api/seed", "/api/error-injection"):
+                return None
+            resp = await http_client.request(
+                method.upper(), url, json=body, timeout=5.0
+            )
+        else:
+            return None
+
+        if resp.status_code >= 500:
+            return None
+        try:
+            return {"status_code": resp.status_code, "json": resp.json()}
+        except ValueError:
+            return {"status_code": resp.status_code, "json": None}
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Step 2 – Build LLM prompt
 # ---------------------------------------------------------------------------
-def build_prompt(path, method, operation):
+def build_prompt(path, method, operation, sample_response: Optional[dict] = None):
     params = operation.get("parameters", [])
     req_body = operation.get("requestBody", {})
     responses = operation.get("responses", {})
     summary = operation.get("summary", "")
     description = operation.get("description", "")
+
+    if sample_response is not None:
+        sample_block = f"""
+Real Live Response (ground truth — fetched from the running server just now,
+status {sample_response["status_code"]}):
+{json.dumps(sample_response["json"], indent=2)}
+
+This is the ACTUAL response shape. Base your assertions on these exact keys
+and structure — do NOT assume different field names than what is shown here.
+"""
+    else:
+        sample_block = """
+No live sample response was available for this endpoint (e.g. it mutates
+state or requires an existing resource). Rely on the OpenAPI schema below,
+and keep structural assertions conservative (e.g. assert response.json() is
+a dict/list) rather than asserting specific field names you are not sure of.
+"""
 
     prompt = f"""You are an expert QA engineer writing pytest-asyncio tests for a FastAPI backend.
 
@@ -76,9 +192,9 @@ Parameters:
 Request Body (if any):
 {json.dumps(req_body, indent=2)}
 
-Expected Responses:
+Expected Responses (OpenAPI spec):
 {json.dumps(responses, indent=2)}
-
+{sample_block}
 Write a **single** pytest-asyncio test function that:
 - Takes `client` as its only parameter — this is an async httpx.AsyncClient fixture provided by the project's conftest.py. Do not define or import it yourself.
 - Covers the happy path and the main error cases (404, 422 validation errors) ONLY if they are actually applicable to this specific endpoint based on the spec above. Skip inapplicable cases silently — do not write comments explaining why a case doesn't apply.
@@ -86,7 +202,7 @@ Write a **single** pytest-asyncio test function that:
 - For POST: test valid creation, invalid payload (blank/too long), and user not found, if applicable.
 - For PUT: test update, 404, validation errors, if applicable.
 - For DELETE: test deletion, then 404 on second attempt, if applicable.
-- Asserts both status codes and response structure (check presence of keys like "id", "user", etc.).
+- Asserts status codes, and asserts response structure using ONLY the keys shown in the Real Live Response above (if provided) — do not invent field names.
 - Contains NO comments and NO explanatory prose — only executable code. Every line must be a statement, not a note.
 
 Name the function: `test_{method}_api_{path.replace("/", "_").strip("_")}`
@@ -189,17 +305,29 @@ async def main():
     print(f"✅ Found {len(spec['paths'])} endpoints.")
 
     all_tests = []
-    for path, methods in spec["paths"].items():
-        for method, operation in methods.items():
-            if method.lower() not in ["get", "post", "put", "delete"]:
-                continue
-            print(f"🧠 Generating test for {method.upper()} {path} ...")
-            prompt = build_prompt(path, method, operation)
-            code = await generate_test(prompt)
-            if code:
-                all_tests.append(code)
-            else:
-                print(f"⚠️  Skipping {method.upper()} {path} due to generation error.")
+    async with httpx.AsyncClient() as http_client:
+        for path, methods in spec["paths"].items():
+            for method, operation in methods.items():
+                if method.lower() not in ["get", "post", "put", "delete"]:
+                    continue
+                print(f"🧠 Generating test for {method.upper()} {path} ...")
+                sample_response = await fetch_sample_response(
+                    http_client, path, method, operation, spec
+                )
+                if sample_response is not None:
+                    print(
+                        f"   📦 Got live sample response (status {sample_response['status_code']})"
+                    )
+                else:
+                    print("   ⚠️  No live sample available — falling back to spec only")
+                prompt = build_prompt(path, method, operation, sample_response)
+                code = await generate_test(prompt)
+                if code:
+                    all_tests.append(code)
+                else:
+                    print(
+                        f"⚠️  Skipping {method.upper()} {path} due to generation error."
+                    )
 
     if not all_tests:
         print("❌ No tests were generated. Exiting.")
