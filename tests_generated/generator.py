@@ -195,11 +195,23 @@ Request Body (if any):
 Expected Responses (OpenAPI spec):
 {json.dumps(responses, indent=2)}
 {sample_block}
+CRITICAL — exact path string: use the path EXACTLY as
+"{path}" (with parameter values substituted) for every request you make to
+this endpoint, including in any setup/arrange step. Do NOT add or remove a
+trailing slash — "{path}" and "{path}/" are different routes and the wrong
+one returns 307, not the response you expect.
+
+CRITICAL — numeric validation boundaries: when the Request Body schema above
+specifies "minimum"/"maximum" (or ge/le) on a numeric field, an "invalid"
+test value must be strictly outside that range (e.g. minimum - 1 or
+maximum + 1), not just any number you guess. Re-read the schema's
+minimum/maximum values above before writing the invalid-payload test case.
+
 Write a **single** pytest-asyncio test function that:
 - Takes `client` as its only parameter — this is an async httpx.AsyncClient fixture provided by the project's conftest.py. Do not define or import it yourself.
 - Covers the happy path and the main error cases (404, 422 validation errors) ONLY if they are actually applicable to this specific endpoint based on the spec above. Skip inapplicable cases silently — do not write comments explaining why a case doesn't apply.
 - For GET: test a valid ID and an invalid/non‑existent ID, if the endpoint takes an ID.
-- For POST: test valid creation, invalid payload (blank/too long), and user not found, if applicable.
+- For POST: test valid creation, invalid payload (blank/too long/out-of-range per the boundary rule above), and user not found, if applicable.
 - For PUT: test update, 404, validation errors, if applicable.
 - For DELETE: test deletion, then 404 on second attempt, if applicable.
 - Asserts status codes, and asserts response structure using ONLY the keys shown in the Real Live Response above (if provided) — do not invent field names.
