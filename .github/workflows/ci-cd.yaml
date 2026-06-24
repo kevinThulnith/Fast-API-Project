@@ -109,6 +109,22 @@ jobs:
           path: reports/test_results.csv
           retention-days: 7
 
+      - name: Generate traditional vs agentic comparison report
+        if: always()
+        run: |
+          uv run python tests_selecter/comparison_report.py \
+            test-results.csv \
+            reports/test_results.csv \
+            reports/comparison_report.csv
+
+      - name: Upload Comparison Report Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: comparison-report
+          path: reports/comparison_report.csv
+          retention-days: 7
+
       - name: Upload server log (for debugging)
         uses: actions/upload-artifact@v4
         if: always()
