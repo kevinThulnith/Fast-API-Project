@@ -14,3 +14,5 @@ github
 .pytest_cache/
 *.env
 .vscode/
+*.csv
+*.json
