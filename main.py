@@ -274,7 +274,7 @@ async def set_error_injection(enabled: bool = Query(...)):
 async def get_users():
     """Returns the full user list. Simulates a 50 ms network delay."""
     await asyncio.sleep(BASE_DELAY)
-    return users_db
+    return list(users_db)
 
 
 @app.get("/api/users/paginated", tags=["users"], summary="Paginated user listing")

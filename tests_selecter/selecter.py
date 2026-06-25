@@ -358,13 +358,29 @@ async def main():
 
     print(f"\n🧪 Running {len(to_run)} tests…")
     csv_rows: List[Dict[str, str]] = []
+    coverage_data_file = os.path.join(
+        os.path.dirname(args.csv_out) if args.csv_out else ".", ".coverage.selector"
+    )
+    if os.path.exists(coverage_data_file):
+        os.remove(coverage_data_file)
+
     for test_id in to_run:
         print(f"\n▶️  {test_id}")
         start = time.monotonic()
         result = subprocess.run(
-            ["pytest", test_id, "-v", "--tb=short", "--no-header"],
+            [
+                "pytest",
+                test_id,
+                "-v",
+                "--tb=short",
+                "--no-header",
+                "--cov=main",
+                "--cov-append",
+                "--cov-report=",
+            ],
             capture_output=True,
             text=True,
+            env={**os.environ, "COVERAGE_FILE": coverage_data_file},
         )
         duration = round(time.monotonic() - start, 3)
 
@@ -387,7 +403,9 @@ async def main():
                 if fixed:
                     print("   💡 Suggested fix (review and apply):")
                     print("   " + "\n   ".join(fixed.splitlines()))
-                    print(f"   ℹ️  Replace the old function in {test_id.split('::')[0]}")
+                    print(
+                        f"   ℹ️  Replace the old function in {test_id.split('::')[0]}"
+                    )
                     failure_message = (
                         f"{failure_message[:500]} | self-heal suggestion generated"
                     )
@@ -408,6 +426,20 @@ async def main():
             )
 
     _write_csv(args.csv_out, csv_rows)
+
+    coverage_json_path = os.path.join(
+        os.path.dirname(args.csv_out) if args.csv_out else ".", "coverage_selector.json"
+    )
+    if os.path.exists(coverage_data_file):
+        subprocess.run(
+            ["coverage", "json", "-o", coverage_json_path],
+            env={**os.environ, "COVERAGE_FILE": coverage_data_file},
+            capture_output=True,
+            text=True,
+        )
+        print(f"📄 Wrote coverage report to {coverage_json_path}")
+    else:
+        print("ℹ️  No coverage data file produced (no tests ran with coverage).")
     print("\n✅ Test selection and execution complete.")
 
 

@@ -71,14 +71,16 @@ jobs:
           retention-days: 7
 
       - name: Run all tests
-        run: uv run pytest tests/test.py tests_generated/generated_test.py -v --csv=test-results.csv --csv-columns=id,status,duration,message
+        run: uv run pytest tests/test.py tests_generated/generated_test.py -v --csv=test-results.csv --csv-columns=id,status,duration,message --cov=main --cov-report=json:coverage_traditional.json
 
       - name: Upload Test Results Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: api-test-results
-          path: test-results.csv
+          path: |
+            test-results.csv
+            coverage_traditional.json
           retention-days: 7
 
       - name: Run test selector with self-healing (predictive test selection)
@@ -106,7 +108,9 @@ jobs:
         if: always()
         with:
           name: selector-test-results
-          path: reports/test_results.csv
+          path: |
+            reports/test_results.csv
+            reports/coverage_selector.json
           retention-days: 7
 
       - name: Generate traditional vs agentic comparison report
@@ -115,7 +119,9 @@ jobs:
           uv run python tests_selecter/comparison_report.py \
             test-results.csv \
             reports/test_results.csv \
-            reports/comparison_report.csv
+            reports/comparison_report.csv \
+            coverage_traditional.json \
+            reports/coverage_selector.json
 
       - name: Upload Comparison Report Artifact
         uses: actions/upload-artifact@v4
