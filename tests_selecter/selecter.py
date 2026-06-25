@@ -29,6 +29,12 @@ client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
+# Always collected by default, regardless of --extra-tests.
+DEFAULT_TEST_PATHS = [
+    "tests/test.py",
+    "tests_generated/generated_test.py",
+]
+
 
 # ---------------------------------------------------------------------------
 # Step 1 – Get code diff
@@ -86,28 +92,60 @@ def parse_diff(diff_text: str) -> Dict[str, List[int]]:
 
 # ---------------------------------------------------------------------------
 # Step 2 – Collect existing tests
+#
+# Always collects the two default project test files. If --extra-tests was
+# passed on the command line, that file or directory is collected in
+# addition to (not instead of) the defaults — so by default you get the
+# standard 2-file pipeline, and opting in to a path like
+# "tests_generated/generated_tests.py" gives you those plus that one.
 # ---------------------------------------------------------------------------
-def collect_tests() -> List[str]:
+def collect_tests(extra_path: Optional[str] = None) -> List[str]:
+    paths = list(DEFAULT_TEST_PATHS)
+
+    if extra_path:
+        if os.path.exists(extra_path):
+            paths.append(extra_path)
+        else:
+            print(
+                f"⚠️  --extra-tests path '{extra_path}' does not exist — "
+                f"running the default {len(DEFAULT_TEST_PATHS)} test file(s) only."
+            )
+
+    # Skip paths that don't exist so pytest isn't asked to collect a
+    # nonexistent default file (e.g. before the agent has ever run, there is
+    # no tests_generated/generated_test.py yet).
+    existing_paths = [p for p in paths if os.path.exists(p)]
+    missing_paths = [p for p in paths if p not in existing_paths]
+    for missing in missing_paths:
+        print(f"⚠️  Test path '{missing}' does not exist — skipping.")
+
+    if not existing_paths:
+        return []
+
     try:
-        # 1. Explicitly point to the specific directories/files
-        # 2. Add the encoding="utf-8" argument to haPndle non-ASCII characters
         result = subprocess.run(
             [
+                sys.executable,
+                "-m",
                 "pytest",
-                "tests/test.py",
-                "tests_generated/generated_test.py",
+                *existing_paths,
                 "--collect-only",
                 "-q",
                 "--no-header",
             ],
             capture_output=True,
             text=True,
-            encoding="utf-8",  # 👈 Prevents the UnicodeDecodeError
+            encoding="utf-8",  # Prevents UnicodeDecodeError on non-ASCII output
         )
         tests = []
         for line in result.stdout.splitlines():
             if "::" in line and "[" not in line:
                 tests.append(line.strip())
+        if not tests and (
+            "error" in result.stdout.lower() or result.returncode not in (0, 5)
+        ):
+            print("⚠️  pytest reported errors during collection:")
+            print(result.stdout[-2000:])
         return tests
     except Exception as e:
         print(f"Failed to collect tests: {e}")
@@ -292,6 +330,14 @@ async def main():
         "--no-heal", action="store_true", help="Skip self-healing attempts"
     )
     parser.add_argument(
+        "--extra-tests",
+        default=None,
+        help="Additional test file or directory to collect ON TOP OF the "
+        f"default {len(DEFAULT_TEST_PATHS)} files ({', '.join(DEFAULT_TEST_PATHS)}). "
+        "E.g. --extra-tests tests_generated/generated_tests.py to also "
+        "include the latest TestGenAgent output.",
+    )
+    parser.add_argument(
         "--csv-out",
         default=None,
         help="Path to write a CSV report (columns: id,status,duration,message) "
@@ -322,7 +368,14 @@ async def main():
         print("⚠️  Could not parse diff line numbers (will still use full diff).")
 
     # Collect tests
-    tests = collect_tests()
+    if args.extra_tests:
+        print(
+            f"📋 Collecting default tests ({', '.join(DEFAULT_TEST_PATHS)}) "
+            f"plus extra path '{args.extra_tests}'…"
+        )
+    else:
+        print(f"📋 Collecting default tests ({', '.join(DEFAULT_TEST_PATHS)})…")
+    tests = collect_tests(extra_path=args.extra_tests)
     if not tests:
         print("❌ No tests found. Are you in the correct directory?")
         _write_csv(args.csv_out, [])
@@ -369,6 +422,8 @@ async def main():
         start = time.monotonic()
         result = subprocess.run(
             [
+                sys.executable,
+                "-m",
                 "pytest",
                 test_id,
                 "-v",

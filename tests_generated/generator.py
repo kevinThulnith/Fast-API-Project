@@ -42,6 +42,81 @@ SERVER_URL = "http://localhost:8000"
 # the MAX_TOKENS env var once you add credits and want richer test bodies.
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1000"))
 
+# Endpoints that mutate auth state in ways we never want to sample for real
+# (creates junk accounts, rotates/revokes tokens, changes passwords, etc.)
+AUTH_MUTATING_PATHS = {
+    "/api/auth/register",
+    "/api/auth/login",
+    "/api/auth/refresh",
+    "/api/auth/logout",
+    "/api/auth/me/password",
+}
+
+# Status codes that mean "this wasn't a real successful sample" — auth
+# failures and validation errors should never be shown to the LLM as if
+# they were the endpoint's actual happy-path response shape.
+NON_SAMPLE_STATUS_CODES = {401, 403, 404, 422}
+
+
+# ---------------------------------------------------------------------------
+# Step 0 – Obtain a real auth session for sampling protected endpoints.
+#
+# Without this, every protected GET/POST/PUT sample comes back 401 with
+# {"detail": "Not authenticated"} — which previously got passed to the LLM
+# as if it were ground truth, producing tests that assert on an error body
+# instead of the real response shape.
+# ---------------------------------------------------------------------------
+async def bootstrap_sampling_session(http_client: httpx.AsyncClient) -> Optional[dict]:
+    """Register a throwaway account and log in, returning auth headers.
+
+    Returns None if registration/login fails for any reason — callers must
+    treat that as "sampling will be unauthenticated" and fall back gracefully.
+    """
+    import uuid
+
+    unique = uuid.uuid4().hex[:10]
+    register_payload = {
+        "email": f"testgen-{unique}@example.com",
+        "username": f"testgen{unique}",
+        "password": "TestGenSample1",
+    }
+    try:
+        reg_resp = await http_client.post(
+            f"{SERVER_URL}/api/auth/register", json=register_payload, timeout=5.0
+        )
+        if reg_resp.status_code != 201:
+            print(
+                f"   ⚠️  Sampling session bootstrap: register returned "
+                f"{reg_resp.status_code} — sampling protected endpoints "
+                f"will be unauthenticated."
+            )
+            return None
+
+        login_resp = await http_client.post(
+            f"{SERVER_URL}/api/auth/login",
+            data={
+                "username": register_payload["email"],
+                "password": register_payload["password"],
+            },
+            timeout=5.0,
+        )
+        if login_resp.status_code != 200:
+            print(
+                f"   ⚠️  Sampling session bootstrap: login returned "
+                f"{login_resp.status_code} — sampling protected endpoints "
+                f"will be unauthenticated."
+            )
+            return None
+
+        token = login_resp.json()["access_token"]
+        print(f"   🔑 Sampling session ready ({register_payload['email']})")
+        return {"Authorization": f"Bearer {token}"}
+    except Exception as e:
+        print(
+            f"   ⚠️  Sampling session bootstrap failed: {e} — proceeding unauthenticated."
+        )
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Step 1 – Fetch OpenAPI spec
@@ -81,6 +156,12 @@ def _sample_value_for_property(name: str, prop: dict):
         fmt = prop.get("format")
         if fmt == "email" or "email" in name.lower():
             return "sample@example.com"
+        # Password-shaped fields need to satisfy the app's strength rule
+        # (>=8 chars, an uppercase letter, a digit) or every sample call
+        # against register/change-password will 422 before we even get
+        # to see a real response.
+        if "password" in name.lower():
+            return "SampleSession1"
         min_len = prop.get("minLength", 1)
         return ("sample text " * 3)[: max(min_len, len("sample"))] or "sample"
     return "sample"
@@ -116,15 +197,31 @@ def build_sample_path(path: str) -> str:
 # we show it one real, ground-truth JSON response from the running server.
 # Best-effort only — if the call fails (e.g. needs a real existing ID),
 # we fall back to "no sample available" and the LLM uses the spec alone.
+#
+# auth_headers, if provided, are attached to every sampling request so
+# protected endpoints return their real 2xx shape instead of a 401.
 # ---------------------------------------------------------------------------
 async def fetch_sample_response(
-    http_client: httpx.AsyncClient, path: str, method: str, operation: dict, spec: dict
+    http_client: httpx.AsyncClient,
+    path: str,
+    method: str,
+    operation: dict,
+    spec: dict,
+    auth_headers: Optional[dict] = None,
 ) -> Optional[dict]:
     sample_path = build_sample_path(path)
     url = f"{SERVER_URL}{sample_path}"
+    headers = dict(auth_headers) if auth_headers else {}
+
+    # Never sample endpoints that mutate auth state for real — creating
+    # junk accounts, rotating/revoking tokens, or changing the sampling
+    # session's own password mid-run would corrupt later samples.
+    if path.rstrip("/") in AUTH_MUTATING_PATHS:
+        return None
+
     try:
         if method.lower() == "get":
-            resp = await http_client.get(url, timeout=5.0)
+            resp = await http_client.get(url, headers=headers, timeout=5.0)
         elif method.lower() == "delete":
             # Never actually delete data while sampling — skip live-fetch for DELETE.
             return None
@@ -136,12 +233,18 @@ async def fetch_sample_response(
             if path.rstrip("/") in ("/api/reset", "/api/seed", "/api/error-injection"):
                 return None
             resp = await http_client.request(
-                method.upper(), url, json=body, timeout=5.0
+                method.upper(), url, json=body, headers=headers, timeout=5.0
             )
         else:
             return None
 
         if resp.status_code >= 500:
+            return None
+        # An auth/validation failure here means we did NOT capture the
+        # endpoint's real success shape — treating it as a sample would
+        # teach the LLM to assert on an error body as if it were the
+        # happy path. Drop it and let the prompt fall back to spec-only.
+        if resp.status_code in NON_SAMPLE_STATUS_CODES:
             return None
         try:
             return {"status_code": resp.status_code, "json": resp.json()}
@@ -154,7 +257,13 @@ async def fetch_sample_response(
 # ---------------------------------------------------------------------------
 # Step 2 – Build LLM prompt
 # ---------------------------------------------------------------------------
-def build_prompt(path, method, operation, sample_response: Optional[dict] = None):
+def build_prompt(
+    path,
+    method,
+    operation,
+    sample_response: Optional[dict] = None,
+    requires_auth: bool = False,
+):
     params = operation.get("parameters", [])
     req_body = operation.get("requestBody", {})
     responses = operation.get("responses", {})
@@ -173,9 +282,24 @@ and structure — do NOT assume different field names than what is shown here.
     else:
         sample_block = """
 No live sample response was available for this endpoint (e.g. it mutates
-state or requires an existing resource). Rely on the OpenAPI schema below,
-and keep structural assertions conservative (e.g. assert response.json() is
-a dict/list) rather than asserting specific field names you are not sure of.
+state, requires an existing resource, or requires auth that wasn't sampled).
+Rely on the OpenAPI schema below, and keep structural assertions conservative
+(e.g. assert response.json() is a dict/list) rather than asserting specific
+field names you are not sure of.
+"""
+
+    auth_block = ""
+    if requires_auth:
+        auth_block = """
+CRITICAL — this endpoint requires authentication: a fixture named
+`auth_headers` is available from conftest.py and returns a dict like
+{"Authorization": "Bearer <token>"}. Pass it as the `headers=` argument on
+every request to this endpoint in the happy-path and validation-error cases.
+For the specific case that asserts a 401, omit `headers` entirely (or pass
+an invalid token) — do not use `auth_headers` for that one assertion, since
+the point of that case is to prove the endpoint rejects unauthenticated
+requests. Add `auth_headers` as a second parameter to the test function
+signature, after `client`.
 """
 
     prompt = f"""You are an expert QA engineer writing pytest-asyncio tests for a FastAPI backend.
@@ -194,7 +318,7 @@ Request Body (if any):
 
 Expected Responses (OpenAPI spec):
 {json.dumps(responses, indent=2)}
-{sample_block}
+{sample_block}{auth_block}
 CRITICAL — exact path string: use the path EXACTLY as
 "{path}" (with parameter values substituted) for every request you make to
 this endpoint, including in any setup/arrange step. Do NOT add or remove a
@@ -208,8 +332,8 @@ maximum + 1), not just any number you guess. Re-read the schema's
 minimum/maximum values above before writing the invalid-payload test case.
 
 Write a **single** pytest-asyncio test function that:
-- Takes `client` as its only parameter — this is an async httpx.AsyncClient fixture provided by the project's conftest.py. Do not define or import it yourself.
-- Covers the happy path and the main error cases (404, 422 validation errors) ONLY if they are actually applicable to this specific endpoint based on the spec above. Skip inapplicable cases silently — do not write comments explaining why a case doesn't apply.
+- Takes `client` as its first parameter — this is an async httpx.AsyncClient fixture provided by the project's conftest.py. Do not define or import it yourself.
+- Covers the happy path and the main error cases (401 if the endpoint requires auth, 404, 422 validation errors) ONLY if they are actually applicable to this specific endpoint based on the spec above. Skip inapplicable cases silently — do not write comments explaining why a case doesn't apply.
 - For GET: test a valid ID and an invalid/non‑existent ID, if the endpoint takes an ID.
 - For POST: test valid creation, invalid payload (blank/too long/out-of-range per the boundary rule above), and user not found, if applicable.
 - For PUT: test update, 404, validation errors, if applicable.
@@ -309,6 +433,19 @@ async def generate_test(prompt, retries: int = 1):
 
 
 # ---------------------------------------------------------------------------
+# Helper – does this operation require a Bearer token?
+#
+# FastAPI's OpenAPI generator records security requirements per-operation
+# when a route depends on a security scheme (e.g. OAuth2PasswordBearer).
+# Routes that only depend on a plain function (no SecurityBase subclass)
+# won't appear here even if they 401 at runtime, so this is best-effort —
+# but it's the only structural signal available from the spec itself.
+# ---------------------------------------------------------------------------
+def operation_requires_auth(operation: dict) -> bool:
+    return bool(operation.get("security"))
+
+
+# ---------------------------------------------------------------------------
 # Step 4 – Write generated tests to file and run them
 # ---------------------------------------------------------------------------
 async def main():
@@ -318,13 +455,21 @@ async def main():
 
     all_tests = []
     async with httpx.AsyncClient() as http_client:
+        sampling_auth_headers = await bootstrap_sampling_session(http_client)
+
         for path, methods in spec["paths"].items():
             for method, operation in methods.items():
                 if method.lower() not in ["get", "post", "put", "delete"]:
                     continue
                 print(f"🧠 Generating test for {method.upper()} {path} ...")
+                requires_auth = operation_requires_auth(operation)
                 sample_response = await fetch_sample_response(
-                    http_client, path, method, operation, spec
+                    http_client,
+                    path,
+                    method,
+                    operation,
+                    spec,
+                    auth_headers=sampling_auth_headers if requires_auth else None,
                 )
                 if sample_response is not None:
                     print(
@@ -332,7 +477,13 @@ async def main():
                     )
                 else:
                     print("   ⚠️  No live sample available — falling back to spec only")
-                prompt = build_prompt(path, method, operation, sample_response)
+                prompt = build_prompt(
+                    path,
+                    method,
+                    operation,
+                    sample_response,
+                    requires_auth=requires_auth,
+                )
                 code = await generate_test(prompt)
                 if code:
                     all_tests.append(code)
@@ -353,8 +504,8 @@ async def main():
         "import pytest\n\n"
         "# ---------------------------------------------------------------------------\n"
         "# Generated tests – review before committing\n"
-        "# The `client` and `reset_db` fixtures come from the project-root\n"
-        "# conftest.py (auto-discovered by pytest) — no import needed here.\n"
+        "# The `client`, `reset_db`, and `auth_headers` fixtures come from the\n"
+        "# project-root conftest.py (auto-discovered by pytest) — no import needed here.\n"
         "# ---------------------------------------------------------------------------\n\n"
     )
     full_file_contents = header + "\n\n".join(all_tests)
@@ -386,6 +537,7 @@ async def main():
     REPORTS_DIR = os.path.join(SCRIPT_DIR, "..", "reports")
     os.makedirs(REPORTS_DIR, exist_ok=True)
     CSV_PATH = os.path.join(REPORTS_DIR, "generated_test_results.csv")
+    COVERAGE_JSON_PATH = os.path.join(REPORTS_DIR, "coverage_traditional.json")
 
     result = subprocess.run(
         [
@@ -396,6 +548,8 @@ async def main():
             "--tb=short",
             f"--csv={CSV_PATH}",
             "--csv-columns=id,status,duration,message",
+            "--cov=main",
+            f"--cov-report=json:{COVERAGE_JSON_PATH}",
         ],
         capture_output=False,
         text=True,

@@ -63,6 +63,40 @@ jobs:
       - name: Run second test
         run: uv run pytest tests_generated/generated_test.py -v --csv=second_test.csv --csv-columns=id,status,duration,message --cov=main --cov-report=json:second_test_coverage.json
 
+      - name: Run generated test
+        run: uv run tests_generated/generator.py
+
+      - name: Run test selector
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin ${{ github.base_ref }}
+            DIFF=$(git diff origin/${{ github.base_ref }}...HEAD)
+          else
+            DIFF=$(git diff HEAD~1)
+          fi
+          echo "$DIFF" > /tmp/diff.txt
+          uv run python tests_selecter/selecter.py --diff /tmp/diff.txt --extra-tests tests_generated/generated_tests.py --run-medium --no-heal --csv-out selecter_results.csv
+
+      - name: Ensure coverage_selector.json exists
+        if: always()
+        run: |
+          if [ ! -f coverage_selector.json ]; then
+            echo "::warning::coverage_selector.json was not produced (likely zero tests selected) — writing placeholder."
+            echo '{"meta": {"note": "no tests were selected by TestSelectAgent on this run"}, "files": {}, "totals": {"covered_lines": 0, "num_statements": 0, "percent_covered": 0.0, "percent_covered_display": "0", "missing_lines": 0, "excluded_lines": 0}}' > coverage_selector.json
+          fi
+
+      - name: Generate traditional vs agentic comparison report
+        if: always()
+        run: |
+          uv run python tests_selecter/comparison_report.py \
+            --first-test-csv first_test.csv \
+            --first-test-coverage first_test_coverage.json \
+            --second-test-csv second_test.csv \
+            --second-test-coverage second_test_coverage.json \
+            --selector-csv selecter_results.csv \
+            --selector-coverage coverage_selector.json \
+            --out reports/comparison_report.csv
+
       - name: Upload Test Results Artifact
         uses: actions/upload-artifact@v4
         if: always()
@@ -74,6 +108,11 @@ jobs:
             first_test_coverage.json
             second_test.csv
             second_test_coverage.json
+            generated_test_results.csv
+            generated_test_coverage.json
+            selecter_results.csv
+            coverage_selector.json
+            reports/comparison_report.csv
           retention-days: 7
 
       - name: Stop API server
