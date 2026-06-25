@@ -16,3 +16,4 @@ github
 .vscode/
 *.csv
 *.json
+.coverage
