@@ -14,7 +14,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.fixture
 async def client():
-    """Async HTTP client for the FastAPI app using ASGI transport."""
+    "Async HTTP client for the FastAPI app using ASGI transport."
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
@@ -23,7 +23,7 @@ async def client():
 
 @pytest.fixture(autouse=True)
 async def reset_db(client):
-    """Reset the database before each test to ensure isolation."""
+    "Reset the database before each test to ensure isolation."
     response = await client.post("/api/reset")
     assert response.status_code == 200
     data = response.json()

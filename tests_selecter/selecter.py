@@ -40,7 +40,7 @@ DEFAULT_TEST_PATHS = [
 # Step 1 – Get code diff
 # ---------------------------------------------------------------------------
 def get_git_diff(commit: str = "HEAD") -> str:
-    """Run git diff and return the unified diff as string."""
+    "Run git diff and return the unified diff as string."
     try:
         result = subprocess.run(
             ["git", "diff", commit],
@@ -56,7 +56,7 @@ def get_git_diff(commit: str = "HEAD") -> str:
 
 
 def read_diff_file(path: str) -> str:
-    """Read a unified diff from a file on disk."""
+    "Read a unified diff from a file on disk."
     try:
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
@@ -163,35 +163,35 @@ def build_selection_prompt(diff_text: str, test_list: List[str]) -> str:
 
     prompt = f"""You are a test-selection assistant for a FastAPI project.
 
-The code diff below shows what changed:
-```diff
-{diff_preview}
-```
+            The code diff below shows what changed:
+            ```diff
+            {diff_preview}
+            ```
 
-Here is the list of all test functions (including file names):
-```
-{tests_preview}
-```
+            Here is the list of all test functions (including file names):
+            ```
+            {tests_preview}
+            ```
 
-Your task:
-1. Analyse the diff and determine which tests are most likely to be affected.
-2. Rank them by relevance: high, medium, low.
-3. Return a JSON object exactly like this:
-{{
-  "high": ["test_file::test_func", "..."],
-  "medium": ["test_file::test_func", "..."],
-  "low": ["test_file::test_func", "..."]
-}}
+            Your task:
+            1. Analyse the diff and determine which tests are most likely to be affected.
+            2. Rank them by relevance: high, medium, low.
+            3. Return a JSON object exactly like this:
+            {{
+            "high": ["test_file::test_func", "..."],
+            "medium": ["test_file::test_func", "..."],
+            "low": ["test_file::test_func", "..."]
+            }}
 
-Only include test IDs that exist in the list above. Do not invent names.
-If no tests are relevant, return empty lists.
-Return only the JSON object, no additional text or markdown.
-"""
+            Only include test IDs that exist in the list above. Do not invent names.
+            If no tests are relevant, return empty lists.
+            Return only the JSON object, no additional text or markdown.
+        """
     return prompt
 
 
 def _strip_code_fences(text: str) -> str:
-    """Remove leading/trailing markdown code fences (```json, ```python, ```) from a string."""
+    "Remove leading/trailing markdown code fences (```json, ```python, ```) from a string."
     text = text.strip()
     if text.startswith("```"):
         # Drop the opening fence line (e.g. ``` or ```json or ```python)
@@ -234,7 +234,7 @@ async def select_tests(diff_text: str, test_list: List[str]) -> Dict[str, List[s
 # Step 4 – Self-healing: suggest fix for a failed test
 # ---------------------------------------------------------------------------
 async def suggest_fix(test_id: str, error_output: str) -> Optional[str]:
-    """Ask LLM to fix the test function based on error."""
+    "Ask LLM to fix the test function based on error."
     test_file = test_id.split("::")[0]
     test_func = test_id.split("::")[1] if "::" in test_id else None
 
@@ -254,20 +254,20 @@ async def suggest_fix(test_id: str, error_output: str) -> Optional[str]:
     content_preview = content[:4000] + ("…" if len(content) > 4000 else "")
 
     prompt = f"""The test {test_id} failed with this error:
-```
-{error_output[:2000]}
-```
+            ```
+            {error_output[:2000]}
+            ```
 
-Here is the content of the test file {test_file}:
-```python
-{content_preview}
-```
+            Here is the content of the test file {test_file}:
+            ```python
+            {content_preview}
+            ```
 
-Please suggest a corrected version of the test function {test_func if test_func else "the failing test"}.
-The failure may be due to an API change (e.g., renamed field, changed status code, or updated validation).
+            Please suggest a corrected version of the test function {test_func if test_func else "the failing test"}.
+            The failure may be due to an API change (e.g., renamed field, changed status code, or updated validation).
 
-Return only the corrected function code (the whole function), no markdown fences.
-"""
+            Return only the corrected function code (the whole function), no markdown fences.
+        """
 
     try:
         response = await asyncio.to_thread(
@@ -458,9 +458,7 @@ async def main():
                 if fixed:
                     print("   💡 Suggested fix (review and apply):")
                     print("   " + "\n   ".join(fixed.splitlines()))
-                    print(
-                        f"   ℹ️  Replace the old function in {test_id.split('::')[0]}"
-                    )
+                    print(f"   ℹ️  Replace the old function in {test_id.split('::')[0]}")
                     failure_message = (
                         f"{failure_message[:500]} | self-heal suggestion generated"
                     )

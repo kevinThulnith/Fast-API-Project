@@ -132,7 +132,7 @@ async def fetch_openapi():
 # Step 1b – Build a plausible request body from a JSON Schema (best-effort)
 # ---------------------------------------------------------------------------
 def _resolve_schema(schema: dict, components: dict) -> dict:
-    """Resolve a single level of $ref against components.schemas."""
+    "Resolve a single level of $ref against components.schemas."
     if "$ref" in schema:
         ref_name = schema["$ref"].split("/")[-1]
         return components.get("schemas", {}).get(ref_name, {})
@@ -140,7 +140,7 @@ def _resolve_schema(schema: dict, components: dict) -> dict:
 
 
 def _sample_value_for_property(name: str, prop: dict):
-    """Generate a small, schema-valid placeholder value for one field."""
+    "Generate a small, schema-valid placeholder value for one field."
     p_type = prop.get("type")
     if "minimum" in prop:
         return prop["minimum"]
@@ -168,7 +168,7 @@ def _sample_value_for_property(name: str, prop: dict):
 
 
 def build_sample_body(operation: dict, spec: dict) -> Optional[dict]:
-    """Build a minimal valid JSON body from requestBody schema, if any."""
+    "Build a minimal valid JSON body from requestBody schema, if any."
     req_body = operation.get("requestBody", {})
     if not req_body:
         return None
@@ -185,7 +185,7 @@ def build_sample_body(operation: dict, spec: dict) -> Optional[dict]:
 
 
 def build_sample_path(path: str) -> str:
-    """Replace {param} placeholders in a path with a safe sample value (1)."""
+    "Replace {param} placeholders in a path with a safe sample value (1)."
     return re.sub(r"\{[^}]+\}", "1", path)
 
 
@@ -272,79 +272,79 @@ def build_prompt(
 
     if sample_response is not None:
         sample_block = f"""
-Real Live Response (ground truth — fetched from the running server just now,
-status {sample_response["status_code"]}):
-{json.dumps(sample_response["json"], indent=2)}
+            Real Live Response (ground truth — fetched from the running server just now,
+            status {sample_response["status_code"]}):
+            {json.dumps(sample_response["json"], indent=2)}
 
-This is the ACTUAL response shape. Base your assertions on these exact keys
-and structure — do NOT assume different field names than what is shown here.
-"""
+            This is the ACTUAL response shape. Base your assertions on these exact keys
+            and structure — do NOT assume different field names than what is shown here.
+        """
     else:
         sample_block = """
-No live sample response was available for this endpoint (e.g. it mutates
-state, requires an existing resource, or requires auth that wasn't sampled).
-Rely on the OpenAPI schema below, and keep structural assertions conservative
-(e.g. assert response.json() is a dict/list) rather than asserting specific
-field names you are not sure of.
-"""
+            No live sample response was available for this endpoint (e.g. it mutates
+            state, requires an existing resource, or requires auth that wasn't sampled).
+            Rely on the OpenAPI schema below, and keep structural assertions conservative
+            (e.g. assert response.json() is a dict/list) rather than asserting specific
+            field names you are not sure of.
+        """
 
     auth_block = ""
     if requires_auth:
         auth_block = """
-CRITICAL — this endpoint requires authentication: a fixture named
-`auth_headers` is available from conftest.py and returns a dict like
-{"Authorization": "Bearer <token>"}. Pass it as the `headers=` argument on
-every request to this endpoint in the happy-path and validation-error cases.
-For the specific case that asserts a 401, omit `headers` entirely (or pass
-an invalid token) — do not use `auth_headers` for that one assertion, since
-the point of that case is to prove the endpoint rejects unauthenticated
-requests. Add `auth_headers` as a second parameter to the test function
-signature, after `client`.
-"""
+            CRITICAL — this endpoint requires authentication: a fixture named
+            `auth_headers` is available from conftest.py and returns a dict like
+            {"Authorization": "Bearer <token>"}. Pass it as the `headers=` argument on
+            every request to this endpoint in the happy-path and validation-error cases.
+            For the specific case that asserts a 401, omit `headers` entirely (or pass
+            an invalid token) — do not use `auth_headers` for that one assertion, since
+            the point of that case is to prove the endpoint rejects unauthenticated
+            requests. Add `auth_headers` as a second parameter to the test function
+            signature, after `client`.
+        """
 
     prompt = f"""You are an expert QA engineer writing pytest-asyncio tests for a FastAPI backend.
 
-Endpoint:
-- Path: {path}
-- Method: {method.upper()}
-- Summary: {summary}
-- Description: {description}
+            Endpoint:
+            - Path: {path}
+            - Method: {method.upper()}
+            - Summary: {summary}
+            - Description: {description}
 
-Parameters:
-{json.dumps(params, indent=2)}
+            Parameters:
+            {json.dumps(params, indent=2)}
 
-Request Body (if any):
-{json.dumps(req_body, indent=2)}
+            Request Body (if any):
+            {json.dumps(req_body, indent=2)}
 
-Expected Responses (OpenAPI spec):
-{json.dumps(responses, indent=2)}
-{sample_block}{auth_block}
-CRITICAL — exact path string: use the path EXACTLY as
-"{path}" (with parameter values substituted) for every request you make to
-this endpoint, including in any setup/arrange step. Do NOT add or remove a
-trailing slash — "{path}" and "{path}/" are different routes and the wrong
-one returns 307, not the response you expect.
+            Expected Responses (OpenAPI spec):
+            {json.dumps(responses, indent=2)}
+            {sample_block}{auth_block}
+            CRITICAL — exact path string: use the path EXACTLY as
+            "{path}" (with parameter values substituted) for every request you make to
+            this endpoint, including in any setup/arrange step. Do NOT add or remove a
+            trailing slash — "{path}" and "{path}/" are different routes and the wrong
+            one returns 307, not the response you expect.
 
-CRITICAL — numeric validation boundaries: when the Request Body schema above
-specifies "minimum"/"maximum" (or ge/le) on a numeric field, an "invalid"
-test value must be strictly outside that range (e.g. minimum - 1 or
-maximum + 1), not just any number you guess. Re-read the schema's
-minimum/maximum values above before writing the invalid-payload test case.
+            CRITICAL — numeric validation boundaries: when the Request Body schema above
+            specifies "minimum"/"maximum" (or ge/le) on a numeric field, an "invalid"
+            test value must be strictly outside that range (e.g. minimum - 1 or
+            maximum + 1), not just any number you guess. Re-read the schema's
+            minimum/maximum values above before writing the invalid-payload test case.
 
-Write a **single** pytest-asyncio test function that:
-- Takes `client` as its first parameter — this is an async httpx.AsyncClient fixture provided by the project's conftest.py. Do not define or import it yourself.
-- Covers the happy path and the main error cases (401 if the endpoint requires auth, 404, 422 validation errors) ONLY if they are actually applicable to this specific endpoint based on the spec above. Skip inapplicable cases silently — do not write comments explaining why a case doesn't apply.
-- For GET: test a valid ID and an invalid/non‑existent ID, if the endpoint takes an ID.
-- For POST: test valid creation, invalid payload (blank/too long/out-of-range per the boundary rule above), and user not found, if applicable.
-- For PUT: test update, 404, validation errors, if applicable.
-- For DELETE: test deletion, then 404 on second attempt, if applicable.
-- Asserts status codes, and asserts response structure using ONLY the keys shown in the Real Live Response above (if provided) — do not invent field names.
-- Contains NO comments and NO explanatory prose — only executable code. Every line must be a statement, not a note.
+            Write a **single** pytest-asyncio test function that:
+            - Takes `client` as its first parameter — this is an async httpx.AsyncClient fixture provided by the project's conftest.py. Do not define or import it yourself.
+            - Covers the happy path and the main error cases (401 if the endpoint requires auth, 404, 422 validation errors) ONLY if they are actually applicable to this specific endpoint based on the spec above. Skip inapplicable cases silently — do not write comments explaining why a case doesn't apply.
+            - For GET: test a valid ID and an invalid/non‑existent ID, if the endpoint takes an ID.
+            - For POST: test valid creation, invalid payload (blank/too long/out-of-range per the boundary rule above), and user not found, if applicable.
+            - For PUT: test update, 404, validation errors, if applicable.
+            - For DELETE: test deletion, then 404 on second attempt, if applicable.
+            - Asserts status codes, and asserts response structure using ONLY the keys shown in the Real Live Response above (if provided) — do not invent field names.
+            - Contains NO comments and NO explanatory prose — only executable code. Every line must be a statement, not a note.
 
-Name the function: `test_{method}_api_{path.replace("/", "_").strip("_")}`
+            Name the function: `test_{method}_api_{path.replace("/", "_").strip("_")}`
 
-Return **only the Python code**, no markdown fences, no extra text.
-"""
+            Return **only the Python code**, no markdown fences, no extra text.
+        """
     return prompt
 
 
@@ -367,7 +367,7 @@ def _extract_code(text: str) -> str:
 
 
 def _is_valid_python(code: str) -> bool:
-    """Quick syntax check so we never write unparseable code to disk."""
+    "Quick syntax check so we never write unparseable code to disk."
     try:
         ast.parse(code)
         return True

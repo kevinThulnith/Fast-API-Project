@@ -19,7 +19,7 @@ async def client():
 
 @pytest.fixture(autouse=True)
 async def reset_db(client):
-    """Reset users_db/posts_db before each test for isolation."""
+    "Reset users_db/posts_db before each test for isolation."
     response = await client.post("/api/reset")
     assert response.status_code == 200
     return response.json()
@@ -151,7 +151,7 @@ async def test_error_injection_forces_500_on_api_routes(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_reset_clears_error_injection(client: AsyncClient):
-    """/api/reset explicitly resets _force_error back to False per main.py."""
+    "/api/reset explicitly resets _force_error back to False per main.py."
     await client.post("/api/error-injection?enabled=true")
     reset_resp = await client.post("/api/reset")
     assert reset_resp.status_code == 200
@@ -584,7 +584,7 @@ async def test_login_with_email(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_login_with_username(client: AsyncClient):
-    """main.py's login accepts either email or username in the username field."""
+    "main.py's login accepts either email or username in the username field."
     payload = {
         "email": "loginuname@example.com",
         "username": "loginunameuser",
@@ -832,7 +832,7 @@ async def test_admin_can_list_and_manage_users(
 
 @pytest.mark.asyncio
 async def test_admin_route_requires_admin_role_not_just_auth(client: AsyncClient):
-    """Confirms require_admin actually checks role, using a non-admin token."""
+    "Confirms require_admin actually checks role, using a non-admin token."
     payload = {
         "email": "notadmin@example.com",
         "username": "notadminuser",

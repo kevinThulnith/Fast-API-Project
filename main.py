@@ -182,7 +182,7 @@ class SeedRequest(BaseModel):
 # Pydantic models — auth
 # ---------------------------------------------------------------------------
 class AuthUser(BaseModel):
-    """Stored in auth_users_db — never returned directly to callers."""
+    # !Stored in auth_users_db — never returned directly to callers.
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     email: EmailStr
@@ -211,8 +211,7 @@ class RegisterRequest(BaseModel):
 
 
 class UserPublic(BaseModel):
-    """Safe subset of AuthUser — what we return to callers."""
-
+    # !Safe subset of AuthUser — what we return to callers.
     id: str
     email: EmailStr
     username: str
@@ -538,7 +537,7 @@ async def logout(
     summary="Return the currently authenticated user",
 )
 async def get_me(current_user: AuthUser = Depends(get_current_user)):
-    """Requires a valid Bearer access token."""
+    "Requires a valid Bearer access token."
     return UserPublic(**current_user.model_dump())
 
 
@@ -581,7 +580,7 @@ async def change_password(
     summary="[Admin] List all registered accounts",
 )
 async def list_auth_users(_admin: AuthUser = Depends(require_admin)):
-    """Returns all registered accounts. Requires admin role."""
+    "Returns all registered accounts. Requires admin role."
     return [UserPublic(**u.model_dump()) for u in auth_users_db.values()]
 
 
@@ -594,7 +593,7 @@ async def deactivate_user(
     user_id: str,
     _admin: AuthUser = Depends(require_admin),
 ):
-    """Deactivates an account. Revokes all its refresh tokens immediately."""
+    "Deactivates an account. Revokes all its refresh tokens immediately."
     user = _auth_users_by_id.get(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="Auth user not found")
